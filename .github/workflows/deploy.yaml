@@ -1,29 +1,75 @@
-name: Deploy Frontend
+name: CI/CD - Frontend
+
 on:
+  # PR 建立或更新時自動進行 CI 驗證（build + test）
+  pull_request:
+    branches: [master]
+
+  # 只有合併到 master（或手動打 tag）時才執行部署
   push:
-    branches:
-      - master # check your repo, your default branch might be master!
- 
+    branches: [master]
+    tags:
+      - 'v*'   # 例如 v1.0.3 → 可作為 production release
+
 jobs:
-  build:
+  # =========================================================
+  # 1️⃣ Continuous Integration (PR 階段)
+  # =========================================================
+  ci-test:
+    name: Run Build & Tests
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'  # 僅 PR 時執行
     steps:
-      - uses: actions/checkout@v3
-      - run: docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-      - run: docker build -t cygnetops/react-test -f Dockerfile.dev .
-      - run: docker run -e CI=true cygnetops/react-test npm test
- 
-      - name: Generate deployment package
+      - name: Checkout PR branch (auto-merge with master)
+        uses: actions/checkout@v3
+
+      - name: Login to Docker Hub
+        run: docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build Dev Image
+        run: docker build -t cygnetops/react-test -f Dockerfile.dev .
+
+      - name: Run Tests
+        run: docker run -e CI=true cygnetops/react-test npm test
+
+      - name: Build Production Bundle
+        run: docker run cygnetops/react-test npm run build --dry-run
+
+  # =========================================================
+  # 2️⃣ Continuous Deployment (master/tag 階段)
+  # =========================================================
+  deploy:
+    name: Deploy to Elastic Beanstalk
+    runs-on: ubuntu-latest
+    needs: ci-test       # 確保測試階段通過後才能部署
+    if: github.event_name == 'push'          # 僅在 push 時執行
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set version label
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version_label=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version_label=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Production Image
+        run: docker build -t cygnetops/react-prod -f Dockerfile .
+
+      - name: Generate Deployment Package
         run: zip -r deploy.zip . -x '*.git*'
- 
-      - name: Deploy to EB
+
+      - name: Deploy to AWS Elastic Beanstalk
         uses: einaregilsson/beanstalk-deploy@v21
         with:
           aws_access_key: ${{ secrets.AWS_ACCESS_KEY }}
           aws_secret_key: ${{ secrets.AWS_SECRET_KEY }}
           application_name: "udemy-frontend"
-          environment_name: "Udemy-frontend-env" 
+          environment_name: "Udemy-frontend-env"
           existing_bucket_name: "elasticbeanstalk-ap-southeast-2-652647042576"
           region: "ap-southeast-2"
-          version_label: ${{ github.sha }}
+          version_label: ${{ steps.version.outputs.version_label }}
           deployment_package: deploy.zip
